@@ -1,15 +1,14 @@
 from sqlalchemy import func
-
+import logging
 import config
 import sqlalchemy
 from sqlalchemy.orm import sessionmaker
 import telebot
 from telebot import types, StateMemoryStorage, custom_filters
 import random
+from database import Database
 
 from models import create_tables, Words, Users, WordsAndUsers
-
-from telebot.states import StatesGroup, State
 
 login = "postgres"
 password = "1234"
@@ -17,29 +16,33 @@ db_name = "english_teacher_bot_db"
 DSN = f'postgresql://{login}:{password}@localhost:5432/{db_name}'
 engine = sqlalchemy.create_engine(DSN)
 
+session = Database(engine)
+
 create_tables(engine)
+logging.basicConfig()
+logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO)
 
-Session = sessionmaker(bind=engine)
-session = Session()
+# Session = sessionmaker(bind=engine)
+# session = Session()
 
-word1 = Words(name="Sky", translation="Небо")
-word2 = Words(name="Love", translation="Любовь")
-word3 = Words(name="Blue", translation="Голубой")
-word4 = Words(name="Unicorn", translation="Единорог")
-word5 = Words(name="Elephant", translation="Слон")
-word6 = Words(name="Happiness", translation="Счастье")
-word7 = Words(name="Rainbow", translation="Радуга")
-word8 = Words(name="Family", translation="Семья")
-word9 = Words(name="Cat", translation="Кот")
-word10 = Words(name="Firework", translation="Фейерверк")
-session.add_all([word1, word2, word3, word4, word5, word6, word7, word8, word9, word10])
-session.commit()
+words = [
+    Words(name="Sky", translation="Небо"),
+    Words(name="Love", translation="Любовь"),
+    Words(name="Blue", translation="Голубой"),
+    Words(name="Unicorn", translation="Единорог"),
+    Words(name="Elephant", translation="Слон"),
+    Words(name="Happiness", translation="Счастье"),
+    Words(name="Rainbow", translation="Радуга"),
+    Words(name="Family", translation="Семья"),
+    Words(name="Cat", translation="Кот"),
+    Words(name="Firework", translation="Фейерверк")
+]
+session.add_initial_words(words)
 
 state_storage = StateMemoryStorage()
 bot = telebot.TeleBot(config.TOKEN, state_storage=state_storage)
 
 known_users = []
-# userStep = {}
 buttons = []
 current_dictionary = "personal"
 
@@ -60,38 +63,16 @@ class Command:
     RETURN_BACK = "Back to all words 🔙"
 
 
-class MyStates(StatesGroup): # так и не поняла зачем, не используется
-    target_word = State()
-    russian_word = State()
-    other_words_list = State()
-
-
-# def get_user_step(uid):  # так и не поняла зачем, не используется
-#     if uid in userStep:
-#         return userStep[uid]
-#     else:
-#         known_users.append(uid)
-#         userStep[uid] = 0
-#         print("New user detected, who hasn't used \"/start\" yet")
-#         return 0
-
-
-@bot.message_handler(commands=["start"]) # функция для старта бота
+@bot.message_handler(commands=["start"])  # функция для старта бота
 def start_bot(message):
     chat_id = message.chat.id
-    existing_user = session.query(Users).filter_by(user_id=str(message.from_user.id)).first()
-    if existing_user is None: # добавляем в БД если такого юзера нет
-        new_user = Users(
-            user_id=message.from_user.id,
-            name=f"{message.from_user.first_name} {message.from_user.last_name}"
-        )
-        session.add(new_user)
-        session.commit()
-        known_users.append(chat_id)
-        # userStep[chat_id] = 0
+    existing_user = session.get_user(message.from_user.id)
+    if existing_user is None:  # добавляем в БД если такого юзера нет
+        session.add_user(message.from_user.id, f"{message.from_user.first_name} {message.from_user.last_name}")
         bot.send_message(chat_id, "Hello, stranger, let's study English!")
     else:  # а если знаем такого, то приветствуем по имени
         bot.send_message(chat_id, f"Hello, {message.from_user.first_name}! Let's go on with english words!")
+
     changing_cards_all(message)
 
 
@@ -103,7 +84,7 @@ def changing_cards_all(message):  # функция для смены карто�
     global current_dictionary
     current_dictionary = "all"
 
-    word = session.query(Words).order_by(func.random()).limit(1).one_or_none()
+    word = session.get_random_word()
     if word:
         target_word = word.name
         russian_word = word.translation
@@ -113,12 +94,8 @@ def changing_cards_all(message):  # функция для смены карто�
 
     target_word_btn = types.KeyboardButton(target_word)
     buttons.append(target_word_btn)
-    other_words_query = session.query(Words).order_by(func.random()).limit(3).all()
-    while target_word in other_words_query:
-        other_words_query = session.query(Words).order_by(func.random()).limit(3)
-        other_words = [word.name for word in other_words_query if word.name != target_word]
-    other_words = other_words_query
-    other_words_list = [word.name for word in other_words if word.name != target_word]
+    other_words_query = session.get_random_words()
+    other_words_list = [word.name for word in other_words_query if word.name != target_word]
     if not other_words_list:  # если список почему-то пуст, то захардкодим три слова
         other_words_list = ["Red", "Rabbit", "Queen"]
     other_words_buttons = [types.KeyboardButton(word) for word in
@@ -131,22 +108,22 @@ def changing_cards_all(message):  # функция для смены карто�
     add_word_btn = types.KeyboardButton(Command.ADD_WORD)
     delete_word_btn = types.KeyboardButton(Command.DELETE_WORD)
     repeat_dict = types.KeyboardButton(Command.REPEAT)
-    buttons.extend([next_btn, add_word_btn, delete_word_btn, repeat_dict])
+    buttons.extend([next_btn, add_word_btn, repeat_dict])
 
     markup.add(*buttons)
 
     bot.send_message(message.chat.id, f"Translate the word '{russian_word}'", reply_markup=markup)
 
-    bot.set_state(message.from_user.id, MyStates.target_word, message.chat.id)
+    bot.set_state(message.from_user.id, message.chat.id)
     with bot.retrieve_data(message.from_user.id, message.chat.id) as data:
         data['already_guessed'] = False
         data['target_word'] = target_word
         data['russian_word'] = russian_word
-        data['other_words_list'] = other_words
+        data['other_words_list'] = other_words_list
         print(f"changing_cards_all: {data['target_word']}, {data['russian_word']}")
 
 
-def changing_cards_personal(message): # функция для смены карточек из личного словаря
+def changing_cards_personal(message):  # функция для смены карточек из личного словаря
     markup = types.ReplyKeyboardMarkup(row_width=2)
     global buttons
     buttons = []
@@ -154,16 +131,11 @@ def changing_cards_personal(message): # функция для смены кар�
     global current_dictionary
     current_dictionary = "personal"
     current_tg_user_id = str(message.from_user.id)
-    user_id = session.query(Users.id).filter(Users.user_id == current_tg_user_id).scalar()
-    count_of_words = session.query(Words).join(WordsAndUsers).filter(WordsAndUsers.id_user == user_id,
-                                                                     WordsAndUsers.deleted == False
-                                                                     ).count()
+    user_id = session.get_user_id(current_tg_user_id)
+    count_of_words = session.count_user_words(user_id)
     bot.send_message(message.chat.id, f"Count of words is {count_of_words}")
     if count_of_words != 0:
-        word = session.query(Words).join(WordsAndUsers).filter(
-            WordsAndUsers.id_user == user_id,
-            WordsAndUsers.deleted == False
-        ).order_by(func.random()).limit(1).one_or_none()
+        word = session.get_random_word_from_user(user_id)
         if word:
             target_word = word.name
             russian_word = word.translation
@@ -173,9 +145,9 @@ def changing_cards_personal(message): # функция для смены кар�
 
     target_word_btn = types.KeyboardButton(target_word)
     buttons.append(target_word_btn)
-    other_words_query = session.query(Words).order_by(func.random()).limit(3).all()
+    other_words_query = session.get_random_words()
     while target_word in other_words_query:
-        other_words_query = session.query(Words).order_by(func.random()).limit(3)
+        other_words_query = session.get_random_words()
         other_words = [word.name for word in other_words_query if word.name != target_word]
     other_words = other_words_query
     other_words_list = [word.name for word in other_words if word.name != target_word]
@@ -196,7 +168,7 @@ def changing_cards_personal(message): # функция для смены кар�
 
     bot.send_message(message.chat.id, f"Translate the word '{russian_word}'", reply_markup=markup)
 
-    bot.set_state(message.from_user.id, MyStates.target_word, message.chat.id)
+    bot.set_state(message.from_user.id, message.chat.id)
     with bot.retrieve_data(message.from_user.id, message.chat.id) as data:
         data['already_guessed'] = False
         data['target_word'] = target_word
@@ -214,7 +186,7 @@ def next_cards(message):
 
 
 @bot.message_handler(func=lambda message: message.text == Command.REPEAT)
-def repeate(message):
+def repeat(message):
     changing_cards_personal(message)
 
 
@@ -226,60 +198,43 @@ def return_back(message):
 @bot.message_handler(func=lambda message: message.text == Command.DELETE_WORD)
 def delete_word(message):
     with bot.retrieve_data(message.from_user.id, message.chat.id) as data:
-        word = data['target_word']
+        target_word = data['target_word']
         translation = data['russian_word']
-        word = session.query(Words).filter_by(name=word, translation=translation).first()
-        word_id = word.id
         tg_user_id = str(message.from_user.id)
-        user_id = session.query(Users.id).filter_by(user_id=tg_user_id)
-        existing_users_word = session.query(WordsAndUsers).filter(WordsAndUsers.id_word == word_id,
-                                                                  WordsAndUsers.id_user == user_id).one_or_none()
-        if existing_users_word is None:
-            bot.send_message(message.chat.id, "The word is not inside the dictionary, to put it click 'Add word'")
-        elif existing_users_word.deleted:
-            bot.send_message(message.chat.id, f"The word '{word.name}' was already deleted, to restore click 'Add word'")
+        user_id = session.get_user_id(tg_user_id)
+        print(f"User ID: {user_id}")
+        word = session.get_user_words(user_id, target_word=target_word)
+        print(word)
+        # word_id = word.id
+        # existing_users_word = session.delete_word()
+        if word:
+            print(234254)
+            print(f'111, {user_id}')
+            print(423456)
+            print(f'333, {word.id}')
+            session.delete_word(word.id, user_id)
+            print(222)
+            bot.send_message(message.chat.id, f"The word '{target_word}' deleted.")
         else:
-            existing_users_word.deleted = True
-            try:
-                session.commit()
-                bot.send_message(message.chat.id, f"The word '{word.name}' deleted.")
-            except Exception as e:
-                print(f"Error during commit: {e}")
-                bot.send_message(message.chat.id, "An error occurred during deleting the word. Try again")
+            bot.send_message(message.chat.id, "The word is not inside the dictionary.")
 
 
 @bot.message_handler(func=lambda message: message.text == Command.ADD_WORD)
 def add_word(message):
     with bot.retrieve_data(message.from_user.id, message.chat.id) as data:
-        word = data['target_word']
+        target_word = data['target_word']
+        print(f"Target word: {target_word}")
         translation = data['russian_word']
-        word = session.query(Words).filter_by(name=word, translation=translation).first()
-        word_id = word.id
+        word = session.get_session().query(Words).filter(Words.name == target_word).one_or_none()
         tg_user_id = str(message.from_user.id)
-        user_id = session.query(Users.id).filter_by(user_id=tg_user_id)
-        # cid = message.chat.id
-        # userStep[cid] = 1
-        existing_users_word = session.query(WordsAndUsers).filter(WordsAndUsers.id_word == word_id,
-                                                                  WordsAndUsers.id_user == user_id).one_or_none()
-        if existing_users_word is None:
-            new_users_word = WordsAndUsers(
-                id_word=word_id,
-                id_user=user_id,
-                deleted=False
-            )
-            session.add(new_users_word)
-            try:
-                session.commit()
+        user_id = session.get_user_id(tg_user_id)
+        success, existing_users_word = session.add_user_word(word.id, user_id)
+
+        if success:
+            if existing_users_word is None:
                 bot.send_message(message.chat.id, f"The word '{word.name}' put inside your personal dictionary! 🎉")
-            except Exception as e:
-                print(f"Error during commit: {e}")
-                bot.send_message(message.chat.id, "An error occurred during adding the word. Try again.")
-
-        elif existing_users_word.deleted:
-            existing_users_word.deleted = False
-
-            bot.send_message(message.chat.id, f"The word '{word.name}' was restore in your dictionary! 🎉")
-
+            else:
+                bot.send_message(message.chat.id, f"The word '{word.name}' was restored in your dictionary! 🎉")
         else:
             bot.send_message(message.chat.id, f"The word '{word.name}' already exists in your dictionary.")
 
